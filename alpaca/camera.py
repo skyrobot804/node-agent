@@ -99,9 +99,9 @@ class Camera:
         self._c._put("abortexposure")
         logger.warning("Exposure aborted")
 
-    def image_array(self) -> list:
+    def image_array(self, timeout: float = 300.0) -> list:
         """Return the last image as a nested list (row-major). Large frames will be slow over HTTP."""
         logger.info("Downloading image array…")
-        data = self._c._get("imagearray")
+        data = self._c._get("imagearray", timeout=timeout)
         logger.info("Image array received")
         return data

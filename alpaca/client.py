@@ -39,11 +39,11 @@ class AlpacaClient:
         self.session = requests.Session()
         self._client_id = id(self) & 0xFFFF
 
-    def _get(self, attribute: str, **params) -> Any:
+    def _get(self, attribute: str, timeout: float = 10, **params) -> Any:
         url = f"{self.base_url}/{attribute}"
         params["ClientID"] = self._client_id
         params["ClientTransactionID"] = _next_transaction_id()
-        response = self.session.get(url, params=params, timeout=10)
+        response = self.session.get(url, params=params, timeout=timeout)
         response.raise_for_status()
         body = response.json()
         self._check_error(attribute, body)

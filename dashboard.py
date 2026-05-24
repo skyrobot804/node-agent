@@ -512,6 +512,8 @@ def api_slew():
             _tel.slew_to_coordinates(ra=ra, dec=dec)
         except Exception as exc:
             logger.error("Slew failed: %s", exc)
+            with _state_lock:
+                _state["error"] = str(exc)
 
     threading.Thread(target=_do, daemon=True, name="tel-slew").start()
     logger.info("Slew commanded: RA=%.4f h  Dec=%.4f °", ra, dec)
@@ -689,6 +691,7 @@ body {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr minmax(0, 320px);
   gap: 1px;
   background: var(--border);
   overflow: hidden;
@@ -885,6 +888,8 @@ body {
 
   <div style="color:var(--dim);font-size:11px;" id="sunEl"></div>
 
+  <div id="errBanner" style="display:none;color:var(--red);font-size:11px;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title=""></div>
+
   <div class="hdr-right">
     <button class="btn btn-blue" onclick="showDiscover()">Discover</button>
   </div>
@@ -1068,6 +1073,15 @@ function renderHeader(s) {
   } else {
     dot.className    = "dot dot-gray";
     label.textContent = "Disconnected";
+  }
+
+  const errBanner = document.getElementById("errBanner");
+  if (s.error) {
+    errBanner.style.display = "block";
+    errBanner.textContent   = "⚠ " + s.error;
+    errBanner.title         = s.error;
+  } else {
+    errBanner.style.display = "none";
   }
 }
 
