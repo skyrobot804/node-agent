@@ -45,6 +45,38 @@ image_watcher:
   watch_path: "/mnt/seestar"      # local mount point of the SMB share
   debounce_delay: 2.0             # seconds to wait after last write before processing
 
+photometry:
+  enabled: false                  # set true to run pipeline on each new FITS file
+
+  node_id: "node_001"             # unique identifier for this node (set before joining network)
+  filter_name: "CV"               # AAVSO filter code: CV=broadband, V=Johnson-V, B=Johnson-B
+
+  # Target override — if set, overrides FITS header OBJECT/RA/DEC
+  # Leave blank to use the header values (normal operation once Seestar is scheduled)
+  target:
+    name: ""                      # e.g. "SS Cyg" or "Nova Her 2025"
+    ra_deg:  ~                    # RA in decimal degrees (null = use FITS header)
+    dec_deg: ~                    # Dec in decimal degrees (null = use FITS header)
+
+  # Plate solving (only runs if FITS lacks WCS — Seestar usually provides it)
+  astap_path: "astap"             # path to ASTAP executable, or just "astap" if in PATH
+  astap_search_radius: 10         # degrees — search radius passed to ASTAP
+
+  # Aperture geometry (in units of FWHM)
+  aperture_factor: 2.5            # aperture radius = factor × FWHM
+  annulus_inner:   4.0            # inner sky annulus radius = factor × FWHM
+  annulus_outer:   6.0            # outer sky annulus radius = factor × FWHM
+
+  # Comparison star query
+  field_radius: 0.5               # degrees — half-width of field to search for comp stars
+  mag_limit:    15.0              # faintest comparison stars to use
+
+  # Quality thresholds (measurements outside these are flagged "poor")
+  min_comparison_stars: 3
+  snr_threshold:        20        # minimum signal-to-noise ratio
+  max_uncertainty:      0.3       # maximum magnitude uncertainty
+  max_airmass:          3.0
+
 safety:
   enabled: true
   disconnect_timeout: 600       # seconds — park after this long without telescope contact

@@ -26,6 +26,7 @@ from alpaca.safety_manager import SafetyManager
 from alpaca.telescope import Telescope
 from alpaca.camera import Camera
 from image_watcher import ImageWatcher
+from photometry import run_pipeline as _run_photometry
 
 
 app = Flask(__name__)
@@ -77,6 +78,11 @@ _state: dict[str, Any] = {
         "watch_path": "",
         "last_file":  None,
         "last_header": {},
+    },
+    "photometry": {
+        "enabled":    False,
+        "last_result": None,   # most recent measurement dict
+        "running":    False,
     },
 }
 _state_lock = threading.Lock()
@@ -260,6 +266,44 @@ def _on_new_fits(info: dict) -> None:
     with _state_lock:
         _state["image_watcher"]["last_file"]  = os.path.basename(path)
         _state["image_watcher"]["last_header"] = header
+
+    # Optionally run photometry pipeline in background thread
+    with _state_lock:
+        phot_enabled = _state["photometry"]["enabled"]
+        phot_running = _state["photometry"]["running"]
+
+    if phot_enabled and not phot_running:
+        threading.Thread(
+            target=_run_photometry_bg,
+            args=(path,),
+            daemon=True,
+            name="photometry",
+        ).start()
+
+
+def _run_photometry_bg(fits_path: str) -> None:
+    """Run the photometry pipeline in a background thread and store the result."""
+    with _state_lock:
+        _state["photometry"]["running"] = True
+    try:
+        cfg = _load_config()
+        result = _run_photometry(fits_path, cfg)
+        with _state_lock:
+            _state["photometry"]["last_result"] = result
+        if result:
+            logger.info(
+                "Photometry: %s  mag=%.3f±%.3f  SNR=%.1f  quality=%s",
+                result["target_name"], result["magnitude"],
+                result["uncertainty"], result["snr"], result["quality_flag"],
+            )
+        else:
+            logger.warning("Photometry pipeline returned no result for %s",
+                           os.path.basename(fits_path))
+    except Exception as exc:
+        logger.error("Photometry pipeline crashed: %s", exc)
+    finally:
+        with _state_lock:
+            _state["photometry"]["running"] = False
 
 
 # ── Safety manager ─────────────────────────────────────────────────────────────
@@ -654,6 +698,55 @@ def api_slew():
     return jsonify({"ok": True})
 
 
+@app.route("/api/telescope/nudge", methods=["POST"])
+def api_nudge():
+    import math
+    if _tel is None:
+        return jsonify({"error": "Telescope not connected"}), 400
+    data = request.get_json(force=True) or {}
+    direction = data.get("direction", "").upper()
+    if direction not in ("N", "S", "E", "W"):
+        return jsonify({"error": "direction must be N/S/E/W"}), 400
+    try:
+        step_arcsec = float(data.get("step", 60))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid step"}), 400
+    if not (1 <= step_arcsec <= 3600):
+        return jsonify({"error": "step must be 1–3600 arcsec"}), 400
+
+    try:
+        cur_ra  = _tel.ra()
+        cur_dec = _tel.dec()
+    except Exception as exc:
+        return jsonify({"error": f"Could not read position: {exc}"}), 500
+
+    step_deg = step_arcsec / 3600.0
+    cos_dec  = math.cos(math.radians(cur_dec)) or 1e-9
+
+    if direction == "N":
+        new_ra, new_dec = cur_ra, min(90.0, cur_dec + step_deg)
+    elif direction == "S":
+        new_ra, new_dec = cur_ra, max(-90.0, cur_dec - step_deg)
+    elif direction == "E":
+        ra_delta = step_deg / (15.0 * cos_dec)
+        new_ra   = (cur_ra - ra_delta) % 24.0
+        new_dec  = cur_dec
+    else:  # W
+        ra_delta = step_deg / (15.0 * cos_dec)
+        new_ra   = (cur_ra + ra_delta) % 24.0
+        new_dec  = cur_dec
+
+    def _do():
+        try:
+            _tel.slew_to_coordinates(ra=new_ra, dec=new_dec)
+        except Exception as exc:
+            logger.error("Nudge slew failed: %s", exc)
+
+    threading.Thread(target=_do, daemon=True, name="tel-nudge").start()
+    logger.info("Nudge %s %.0f\" → RA=%.4f h  Dec=%.4f °", direction, step_arcsec, new_ra, new_dec)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/camera/expose", methods=["POST"])
 def api_expose():
     if _cam is None:
@@ -741,6 +834,17 @@ def pier_cam_stream():
         content_type="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.route("/api/photometry")
+def api_photometry():
+    with _state_lock:
+        snap = {
+            "enabled":     _state["photometry"]["enabled"],
+            "running":     _state["photometry"]["running"],
+            "last_result": _state["photometry"]["last_result"],
+        }
+    return jsonify(snap)
 
 
 @app.route("/api/pier-cam/snapshot")
@@ -1302,6 +1406,33 @@ body {
       </div>
       <button class="btn btn-blue btn-full" id="btnModalSlew" onclick="apiSlew()" disabled>Slew to Target</button>
     </div>
+
+    <!-- Joystick -->
+    <div class="ctrl-group">
+      <div class="panel-label">Nudge</div>
+      <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+        <div style="display:grid; grid-template-columns:40px 40px 40px; grid-template-rows:40px 40px 40px; gap:4px;">
+          <div></div>
+          <button class="btn btn-dim joy-btn" id="joyN" onclick="apiNudge('N')" disabled style="padding:0; font-size:16px;" title="North (+Dec)">▲</button>
+          <div></div>
+          <button class="btn btn-dim joy-btn" id="joyW" onclick="apiNudge('W')" disabled style="padding:0; font-size:16px;" title="West (+RA)">◄</button>
+          <div style="display:flex;align-items:center;justify-content:center;color:var(--border);font-size:10px;">✛</div>
+          <button class="btn btn-dim joy-btn" id="joyE" onclick="apiNudge('E')" disabled style="padding:0; font-size:16px;" title="East (−RA)">►</button>
+          <div></div>
+          <button class="btn btn-dim joy-btn" id="joyS" onclick="apiNudge('S')" disabled style="padding:0; font-size:16px;" title="South (−Dec)">▼</button>
+          <div></div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          <div style="font-size:10px; color:var(--dim); letter-spacing:1px;">STEP SIZE</div>
+          <div style="display:flex; flex-direction:column; gap:4px;" id="nudgeStepBtns">
+            <button class="btn btn-dim" style="font-size:11px; padding:3px 10px;" onclick="setNudgeStep(10)"   id="nudge10">10″</button>
+            <button class="btn btn-dim" style="font-size:11px; padding:3px 10px;" onclick="setNudgeStep(60)"   id="nudge60">1′</button>
+            <button class="btn btn-dim" style="font-size:11px; padding:3px 10px;" onclick="setNudgeStep(300)"  id="nudge300">5′</button>
+            <button class="btn btn-dim" style="font-size:11px; padding:3px 10px;" onclick="setNudgeStep(900)"  id="nudge900">15′</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1390,6 +1521,7 @@ async function poll() {
 }
 setInterval(poll, 1000);
 poll();
+setNudgeStep(60);
 
 function render(s) {
   renderHeader(s);
@@ -1543,6 +1675,9 @@ function renderTelescope(t) {
   document.getElementById("btnModalTrackOn").disabled  = blocked;
   document.getElementById("btnModalTrackOff").disabled = blocked;
   document.getElementById("btnModalSlew").disabled     = blocked;
+  ["joyN","joyS","joyE","joyW"].forEach(id => {
+    document.getElementById(id).disabled = blocked;
+  });
 }
 
 // ── Camera ───────────────────────────────────────────────────────────────────
@@ -1733,6 +1868,29 @@ async function apiTracking(enabled) {
   } catch (e) { alert("Set tracking failed: " + e.message); }
 }
 
+let _nudgeStep = 60;
+
+function setNudgeStep(arcsec) {
+  _nudgeStep = arcsec;
+  ["10","60","300","900"].forEach(v => {
+    const el = document.getElementById("nudge" + v);
+    if (el) el.style.borderColor = (parseInt(v) === arcsec) ? "var(--blue)" : "";
+    if (el) el.style.color       = (parseInt(v) === arcsec) ? "var(--blue)" : "";
+  });
+}
+
+async function apiNudge(direction) {
+  try {
+    const r = await fetch("/api/telescope/nudge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ direction, step: _nudgeStep }),
+    });
+    const d = await r.json();
+    if (!d.ok) alert(d.error || "Nudge failed");
+  } catch (e) { alert("Nudge failed: " + e.message); }
+}
+
 async function apiSlew() {
   const ra  = parseFloat(document.getElementById("slewRA").value);
   const dec = parseFloat(document.getElementById("slewDec").value);
@@ -1903,6 +2061,12 @@ def launch(port: int = 5173) -> None:
         with _state_lock:
             _state["image_watcher"]["enabled"]    = True
             _state["image_watcher"]["watch_path"] = watch_path
+
+    phot_cfg = cfg.get("photometry", {})
+    if phot_cfg.get("enabled", False):
+        with _state_lock:
+            _state["photometry"]["enabled"] = True
+        logger.info("Photometry pipeline enabled (node_id=%s)", phot_cfg.get("node_id", "?"))
 
     pc_cfg = cfg.get("pier_cam", {})
     if pc_cfg.get("enabled", False):
