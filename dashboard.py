@@ -10,6 +10,7 @@ import base64
 import io
 import json
 import logging
+import os
 import queue
 import sys
 import threading
@@ -23,6 +24,7 @@ from alpaca.discovery import discover_servers
 from alpaca.safety_manager import SafetyManager
 from alpaca.telescope import Telescope
 from alpaca.camera import Camera
+from image_watcher import ImageWatcher
 
 
 app = Flask(__name__)
@@ -64,6 +66,12 @@ _state: dict[str, Any] = {
     "image_captured": False,
     "image_id":       0,
     "error":          None,
+    "image_watcher": {
+        "enabled":    False,
+        "watch_path": "",
+        "last_file":  None,
+        "last_header": {},
+    },
 }
 _state_lock = threading.Lock()
 
@@ -175,6 +183,73 @@ def _capture_image() -> None:
         logger.info("Image stored — %.1f KB PNG", len(b64) * 3 / 4 / 1024)
     except Exception as exc:
         logger.error("Image capture failed: %s", exc)
+
+
+# ── Image watcher ──────────────────────────────────────────────────────────────
+
+_image_watcher: Optional[ImageWatcher] = None
+
+
+def _fits_to_png_b64(path: str) -> Optional[str]:
+    try:
+        from astropy.io import fits
+        import numpy as np
+        from PIL import Image
+
+        with fits.open(path, memmap=False, ignore_missing_simple=True) as hdul:
+            data = hdul[0].data
+
+        if data is None:
+            return None
+
+        arr = np.array(data, dtype=np.float32)
+
+        # Handle 3-D cubes (C, H, W) → (H, W) by taking the first plane
+        if arr.ndim == 3:
+            arr = arr[0]
+
+        mn, mx = float(arr.min()), float(arr.max())
+        if mx > mn:
+            arr = (arr - mn) / (mx - mn) * 255.0
+        arr = arr.clip(0, 255).astype(np.uint8)
+
+        img = Image.fromarray(arr, mode="L")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+
+    except Exception as exc:
+        logger.error("FITS→PNG conversion failed: %s", exc)
+        return None
+
+
+def _on_new_fits(info: dict) -> None:
+    path   = info["path"]
+    header = info.get("header", {})
+    kb     = info.get("size_kb", 0.0)
+
+    obj     = header.get("OBJECT", "")
+    exptime = header.get("EXPTIME") or header.get("EXPOSURE")
+    filter_ = header.get("FILTER", "")
+
+    parts = [f"{kb:.1f} KB"]
+    if obj:     parts.append(f"obj={obj}")
+    if exptime: parts.append(f"exp={exptime}s")
+    if filter_: parts.append(f"filter={filter_}")
+    logger.info("FITS captured: %s  (%s)", os.path.basename(path), "  ".join(parts))
+
+    b64 = _fits_to_png_b64(path)
+    if b64:
+        with _last_image_lock:
+            global _last_image_b64
+            _last_image_b64 = b64
+        with _state_lock:
+            _state["image_captured"] = True
+            _state["image_id"]      += 1
+
+    with _state_lock:
+        _state["image_watcher"]["last_file"]  = os.path.basename(path)
+        _state["image_watcher"]["last_header"] = header
 
 
 # ── Safety manager ─────────────────────────────────────────────────────────────
@@ -1329,7 +1404,7 @@ async function connectTo(host, port) {
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def launch(port: int = 5173) -> None:
-    global _safety_mgr
+    global _safety_mgr, _image_watcher
 
     import urllib.request
     import webbrowser
@@ -1343,6 +1418,16 @@ def launch(port: int = 5173) -> None:
 
     _safety_mgr = SafetyManager(config=cfg, on_unsafe=_on_safety_unsafe)
     _safety_mgr.start()
+
+    iw_cfg = cfg.get("image_watcher", {})
+    if iw_cfg.get("enabled", False):
+        watch_path     = iw_cfg.get("watch_path", "/mnt/seestar")
+        debounce_delay = float(iw_cfg.get("debounce_delay", 2.0))
+        _image_watcher = ImageWatcher(watch_path, _on_new_fits, debounce_delay)
+        _image_watcher.start()
+        with _state_lock:
+            _state["image_watcher"]["enabled"]    = True
+            _state["image_watcher"]["watch_path"] = watch_path
 
     flask_thread = threading.Thread(
         target=lambda: app.run(
@@ -1373,6 +1458,8 @@ def launch(port: int = 5173) -> None:
     finally:
         if _safety_mgr is not None:
             _safety_mgr.stop()
+        if _image_watcher is not None:
+            _image_watcher.stop()
 
 
 if __name__ == "__main__":

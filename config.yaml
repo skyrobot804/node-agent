@@ -30,6 +30,11 @@ logging:
   level: INFO
   format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
+image_watcher:
+  enabled: false                  # set true to watch for Seestar FITS files
+  watch_path: "/mnt/seestar"      # local mount point of the SMB share
+  debounce_delay: 2.0             # seconds to wait after last write before processing
+
 safety:
   enabled: true
   disconnect_timeout: 600       # seconds — park after this long without telescope contact

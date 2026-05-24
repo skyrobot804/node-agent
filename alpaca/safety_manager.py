@@ -131,6 +131,7 @@ class SafetyManager:
         self._heartbeat_ok     : bool            = True
         self._last_heartbeat   : Optional[float] = None   # UTC epoch
         self._disconnect_since : Optional[float] = None   # monotonic
+        self._telescope_attached_at : Optional[float] = None  # monotonic
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -139,6 +140,7 @@ class SafetyManager:
         with self._lock:
             self._tel              = telescope
             self._disconnect_since = None
+            self._telescope_attached_at = time.monotonic() if telescope is not None else None
         if telescope is not None:
             logger.info("SafetyManager: telescope attached")
 
@@ -252,8 +254,19 @@ class SafetyManager:
     def _run_connection_check(self) -> None:
         with self._lock:
             tel = self._tel
+            attached_at = self._telescope_attached_at
         if tel is None:
             return  # Skip heartbeat until telescope is attached
+
+        # Skip disconnect logic for 10s after attachment to allow scope discovery
+        if attached_at is not None:
+            age = time.monotonic() - attached_at
+            if age < 10:
+                alive = self._heartbeat()
+                with self._lock:
+                    self._heartbeat_ok = alive
+                    self._last_heartbeat = time.time()
+                return
 
         alive = self._heartbeat()
         with self._lock:
