@@ -36,7 +36,14 @@ The Safety Manager is a protective watchdog that runs continuously in the backgr
    ```bash
    pip install -r requirements.txt
    ```
-   This installs `requests` (HTTP client) and `pyyaml` (config parsing).
+   This installs:
+   - `requests` — HTTP client for ALPACA communication
+   - `pyyaml` — config file parsing
+   - `flask` — web server framework
+   - `watchdog` — file system event monitoring (for ImageWatcher)
+   - `astropy` — FITS file parsing (for ImageWatcher)
+   - `numpy` — numerical array operations for image processing
+   - `Pillow` — image display and format handling
 
 3. **Verify imports work:**
    ```bash
@@ -127,7 +134,7 @@ python dashboard.py
 
 **What happens:**
 
-1. **Flask web server** starts on `http://localhost:5000`
+1. **Flask web server** starts on `http://localhost:5173`
 2. **Safety Manager** starts (registers OS signal handlers, begins monitoring)
 3. **Browser opens** automatically to the dashboard
 4. **Automatic sequence** begins:
@@ -142,11 +149,12 @@ python dashboard.py
 
 **Dashboard features:**
 - **Live sequence progress** with step indicators (Discover → Connect → Unpark → Slew → Hold → Expose → Park)
-- **Telescope state**: real-time RA/Dec coordinates, slewing status, tracking, park status
-- **Camera state**: exposure mode, image readiness
+- **Telescope state**: real-time RA/Dec coordinates, slewing status, tracking, park status, custom slew coordinate input
+- **Camera state**: exposure mode, image readiness, captured image display
 - **Safety status**: ✓ SAFE or ✗ UNSAFE (with reason), sun elevation, heartbeat indicator
 - **Live log stream**: every action logged with timestamps and colours
-- **Manual controls**: Discover, Run Sequence, Abort buttons
+- **Image watcher**: optional file monitoring for Seestar FITS files with automatic ingestion
+- **Manual controls**: Discover, Run Sequence, Abort, custom slew coordinate entry buttons
 
 **Sample dashboard log:**
 ```
@@ -155,16 +163,52 @@ python dashboard.py
 14:35:24 [INFO] dashboard: Connecting to ALPACA server 192.168.1.100:11111
 14:35:24 [INFO] alpaca.telescope: Telescope connected: Simulator Telescope
 14:35:24 [INFO] alpaca.camera: Camera connected: Simulator Camera
+14:35:24 [INFO] image_watcher: Image watcher started, monitoring /mnt/seestar
 14:35:25 [INFO] alpaca.telescope: Telescope unparked
 14:35:25 [INFO] alpaca.telescope: Tracking set to True
 14:35:25 [INFO] alpaca.telescope: Slewing to RA=10.6833 h  Dec=41.2692 °
 14:35:27 [INFO] alpaca.telescope: Slew complete — RA=10.6833 h  Dec=41.2692 °
 14:35:29 [INFO] alpaca.camera: Starting 1.00 s light exposure
 14:35:30 [INFO] alpaca.camera: Exposure complete — image ready for download
-14:35:31 [INFO] alpaca.telescope: Parking telescope…
+14:35:31 [INFO] dashboard: Image captured (2048×1536, 3.2 MB)
+14:35:31 [INFO] image_watcher: New FITS file detected: /mnt/seestar/observation_001.fits (4.5 MB, OBJECT=M31)
+14:35:32 [INFO] alpaca.telescope: Parking telescope…
 14:35:33 [INFO] alpaca.telescope: Telescope parked
 14:35:33 [INFO] dashboard: Sequence complete.
 ```
+
+---
+
+## Image Watcher
+
+The **Image Watcher** monitors a directory for new FITS files (e.g., from Seestar or other imaging systems) and processes them automatically:
+
+### Enabling Image Watcher
+
+Edit `config.yaml`:
+```yaml
+image_watcher:
+  enabled: true                   # set true to enable monitoring
+  watch_path: "/mnt/seestar"      # path to watch for new files
+  debounce_delay: 2.0             # seconds to wait after last write before processing
+```
+
+### How It Works
+
+1. Monitors the watch directory for new `.fits` or `.fit` files
+2. Uses OS-level file system events (FSEvents/inotify/kqueue) — no polling overhead
+3. Debounces partial writes to avoid processing incomplete files
+4. On new file detection:
+   - Extracts FITS header metadata (OBJECT, EXPTIME, etc.)
+   - Reports file size and location
+   - Broadcasts event to dashboard for live updates
+5. Dashboard displays:
+   - File path and size
+   - FITS header information (if available)
+   - Image preview (when applicable)
+
+**Typical use case:**  
+You have a separate imaging system (Seestar, Stellarmate, etc.) that writes FITS files to a network share. The Image Watcher picks up these files in real-time and integrates them into your observing session log.
 
 ---
 
@@ -174,12 +218,14 @@ python dashboard.py
 
 ```
 dashboard.py (entry point)
-  ├─ Flask web server (port 5000)
+  ├─ Flask web server (port 5173)
   │   ├─ /api/discover       — UDP broadcast discovery
   │   ├─ /api/connect        — manual server connect
   │   ├─ /api/run            — start sequence
   │   ├─ /api/abort          — stop sequence
-  │   ├─ /api/status         — current state (telescope, camera, phase, safety)
+  │   ├─ /api/slew           — custom coordinate slewing
+  │   ├─ /api/image          — retrieve captured image
+  │   ├─ /api/status         — current state (telescope, camera, phase, safety, image watcher)
   │   ├─ /api/safety         — safety manager status
   │   └─ /api/logs           — live log stream (Server-Sent Events)
   │
@@ -189,6 +235,12 @@ dashboard.py (entry point)
   │   ├─ Dawn calculator (solar elevation NOAA algorithm)
   │   ├─ Signal handlers (SIGTERM, SIGINT)
   │   └─ Emergency park on: timeout / dawn / disconnect / signals
+  │
+  ├─ ImageWatcher (daemon thread, if enabled)
+  │   ├─ File system event monitoring
+  │   ├─ Debounce logic for partial writes
+  │   ├─ FITS header extraction
+  │   └─ Event broadcast to dashboard
   │
   └─ Sequence runner (daemon thread)
        └─ DeviceManager (owns device lifecycle)
@@ -269,17 +321,28 @@ The Safety Manager runs continuously in the background, independent of the seque
 
 #### `dashboard.py`
 Web-based sequence runner with live monitoring:
-- **Flask server** on port 5000 with real-time log streaming (Server-Sent Events)
+- **Flask server** on port 5173 with real-time log streaming (Server-Sent Events)
 - **Background poller** updates telescope/camera state every second
 - **Sequence runner thread** orchestrates: discover → connect → unpark → track → slew → expose → park
 - **Safety integration**: SafetyManager is instantiated at startup (so signal handlers are registered from the main thread), and `on_unsafe()` callback aborts the sequence if the system becomes unsafe
-- **Live UI**: Shows current phase, coordinates, camera state, safety status, and a live scrolling log
+- **Image watcher integration**: Launches ImageWatcher if enabled in config, displays captured images in real-time
+- **Live UI**: Shows current phase, coordinates, camera state, safety status, captured images, and a live scrolling log
+- **Custom coordinates**: Supports manual RA/Dec input for ad-hoc slewing during observations
 
-**Key files:**
-- `/api/status` — returns full system state (telescope, camera, sequence phase, safety flags)
+#### `image_watcher.py`
+File system monitoring for new FITS files:
+- **Watchdog-based monitoring**: Uses OS-level file system events (FSEvents/inotify/kqueue) for efficient directory monitoring
+- **Debounce logic**: Prevents processing incomplete files; configurable delay ensures full write before callback
+- **FITS header parsing**: Extracts metadata (OBJECT, EXPTIME, etc.) for dashboard display
+- **Event stream**: Reports file path, size, header, and modification time to callbacks
+
+**Key endpoints:**
+- `/api/status` — returns full system state (telescope, camera, sequence phase, safety flags, image watcher status)
 - `/api/logs` — Server-Sent Events stream of all logged messages
 - `/api/run` — POST to start the sequence
 - `/api/abort` — POST to stop the sequence
+- `/api/slew` — POST with `ra` and `dec` parameters for custom coordinate slewing
+- `/api/image` — GET to retrieve the latest captured image (base64 encoded)
 
 ---
 
@@ -445,6 +508,35 @@ def api_wind():
 ```
 
 Update the dashboard HTML to display the new data (add panels or status pills like the safety indicator).
+
+### Integrating Custom Image Processing
+To add custom image processing to captured images, extend `dashboard.py`:
+
+```python
+from image_watcher import ImageWatcher
+
+def process_fits_file(event_dict: dict) -> None:
+    """Called when ImageWatcher detects a new FITS file."""
+    path = event_dict["path"]
+    header = event_dict["header"]
+    
+    # Custom processing (e.g., plate solving, astrometry)
+    logger.info(f"Processing {path}: {header.get('OBJECT', 'Unknown')}")
+    
+    # Update dashboard state if needed
+    with _state_lock:
+        _state["image_watcher"]["last_file"] = path
+        _state["image_watcher"]["last_header"] = header
+
+# In launch():
+if cfg.get("image_watcher", {}).get("enabled"):
+    watcher = ImageWatcher(
+        cfg["image_watcher"]["watch_path"],
+        process_fits_file,
+        cfg["image_watcher"]["debounce_delay"]
+    )
+    watcher.start()
+```
 
 ---
 
