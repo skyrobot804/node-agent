@@ -250,6 +250,11 @@ class SafetyManager:
             self._stop_event.wait(timeout=5.0)
 
     def _run_connection_check(self) -> None:
+        with self._lock:
+            tel = self._tel
+        if tel is None:
+            return  # Skip heartbeat until telescope is attached
+
         alive = self._heartbeat()
         with self._lock:
             self._heartbeat_ok   = alive
