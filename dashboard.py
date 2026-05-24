@@ -847,11 +847,22 @@ body {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr minmax(0, 320px);
   gap: 1px;
   background: var(--border);
   overflow: hidden;
   min-height: 0;
+}
+
+.main-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gray);
+  font-size: 12px;
+  letter-spacing: 2px;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .log-footer {
@@ -898,13 +909,11 @@ body {
 .img-col.hidden { display: none; }
 
 .img-sub {
-  flex: 1;
+  background: var(--surface);
   padding: 14px 20px;
   display: flex; flex-direction: column; gap: 10px;
-  overflow-y: auto; min-height: 0;
-  border-right: 1px solid var(--border);
+  overflow: hidden; min-height: 0;
 }
-.img-sub:last-child { border-right: none; }
 .img-sub.hidden { display: none; }
 .img-sub::-webkit-scrollbar { width: 6px; }
 .img-sub::-webkit-scrollbar-track { background: var(--bg); }
@@ -913,13 +922,13 @@ body {
 
 /* ── Pier cam ── */
 .pier-cam-wrap {
-  background: #000; border: 1px solid var(--border);
+  background: #000;
   display: flex; align-items: center; justify-content: center;
-  min-height: 160px; overflow: hidden; flex-shrink: 0;
+  flex: 1; min-height: 0; overflow: hidden;
 }
 .pier-cam-wrap img {
-  display: block; max-width: 100%; max-height: 240px; width: 100%;
-  image-rendering: auto;
+  display: block; max-width: 100%; max-height: 100%; width: 100%; height: 100%;
+  object-fit: contain; image-rendering: auto;
 }
 .pier-cam-badge {
   font-size: 10px; letter-spacing: 1px; color: var(--dim); flex-shrink: 0;
@@ -1055,6 +1064,66 @@ body {
   padding: 1px 7px; border: 1px solid var(--border);
 }
 
+/* ── Modal overlay ── */
+.modal {
+  position: fixed; inset: 0;
+  background: rgba(7,10,14,.92);
+  backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+.modal.hidden { display: none; }
+
+.modal-content {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 28px;
+  max-height: 90vh;
+  overflow-y: auto;
+  width: 90%;
+  max-width: 600px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.modal-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 16px;
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+
+.modal-close {
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s;
+}
+
+.modal-close:hover {
+  color: var(--text);
+}
+
 /* ── Discovery overlay ── */
 .overlay {
   position: fixed; inset: 0;
@@ -1109,38 +1178,90 @@ body {
   <div id="errBanner" style="display:none;color:var(--red);font-size:11px;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title=""></div>
 
   <div class="hdr-right">
+    <button class="btn btn-dim" id="btnHdrTel" onclick="openTelescopeModal()">
+      <span class="dot dot-gray" id="telDot" style="vertical-align:middle;margin-right:5px;"></span>Telescope
+    </button>
+    <button class="btn btn-dim" id="btnHdrCam" onclick="openCameraModal()">
+      <span class="dot dot-gray" id="camDot" style="vertical-align:middle;margin-right:5px;"></span>Camera
+    </button>
     <button class="btn btn-blue" onclick="showDiscover()">Discover</button>
   </div>
 </div>
 
 <!-- Main grid -->
-<div class="main">
+<div class="main" id="mainGrid">
 
-  <!-- Telescope panel -->
-  <div class="panel">
-    <div class="panel-hdr">
+  <!-- Empty state shown when nothing to display -->
+  <div class="main-empty" id="mainEmpty" style="grid-column:1/-1;background:var(--surface);">
+    <div style="font-size:24px;opacity:0.3">✦</div>
+    <div>No active feeds — connect a device to get started</div>
+  </div>
+
+  <!-- Pier cam panel -->
+  <div class="img-sub hidden" id="pierCamSub">
+    <div class="panel-hdr" style="flex-shrink:0">
       <div class="panel-name">
-        <span class="dot dot-gray" id="telDot"></span>
-        Telescope
+        <span class="dot dot-gray" id="pierCamDot"></span>
+        Live View
       </div>
-      <div class="badges" id="telBadges"></div>
+      <div id="pierCamBadge" style="font-size:10px;color:var(--dim)"></div>
+    </div>
+    <div class="pier-cam-wrap" style="flex:1;min-height:0;">
+      <img id="pierCamImg" src="" alt="Pier cam live view" style="max-height:100%;height:100%;object-fit:contain;">
+    </div>
+    <div class="pier-cam-badge" id="pierCamStatus"></div>
+  </div>
+
+  <!-- Last exposure panel -->
+  <div class="img-sub hidden" id="lastExpSub">
+    <div class="panel-hdr" style="flex-shrink:0">
+      <div class="panel-name">Last Exposure</div>
+      <div id="imgReadyBadge" style="font-size:10px;color:var(--dim)"></div>
+    </div>
+    <div class="img-inner" style="flex:1;align-items:stretch;">
+      <div class="img-frame" style="max-width:none;flex:1;display:flex;align-items:center;justify-content:center;">
+        <img id="lastImg" src="" alt="Last exposure" style="max-width:100%;max-height:100%;object-fit:contain;image-rendering:pixelated;">
+      </div>
+      <div class="img-meta" id="imgMeta" style="min-width:140px;"></div>
+    </div>
+  </div>
+
+</div><!-- /main -->
+
+<!-- Telescope Modal -->
+<div class="modal hidden" id="telModal" onclick="if(event.target===this)closeTelescopeModal()">
+  <div class="modal-content">
+    <div class="modal-header">
+      <div class="modal-title">
+        <span class="dot dot-gray" id="telModalDot"></span>
+        🔭 Telescope Control
+        <div class="badges" id="telModalBadges" style="margin-left:8px;"></div>
+      </div>
+      <button class="modal-close" onclick="closeTelescopeModal()">×</button>
     </div>
 
     <!-- Coordinates -->
-    <div class="coords">
-      <div class="coord-lbl">R.A.</div>
-      <div class="coord-val dim" id="telRA">—</div>
-      <div class="coord-lbl">Dec</div>
-      <div class="coord-val dim" id="telDec">—</div>
+    <div style="display: flex; flex-direction: column; gap: 12px; border-bottom: 1px solid var(--border); padding-bottom: 12px;">
+      <div style="font-size: 14px; color: var(--dim); letter-spacing: 1px;">CURRENT POSITION</div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <div>
+          <div style="font-size: 11px; color: var(--dim); letter-spacing: 1px; margin-bottom: 4px;">R.A.</div>
+          <div class="coord-val" id="telModalRA" style="font-size: 18px;">—</div>
+        </div>
+        <div>
+          <div style="font-size: 11px; color: var(--dim); letter-spacing: 1px; margin-bottom: 4px;">DEC</div>
+          <div class="coord-val" id="telModalDec" style="font-size: 18px;">—</div>
+        </div>
+      </div>
+      <div class="coord-raw" id="telModalRaw" style="font-size: 10px;"></div>
     </div>
-    <div class="coord-raw" id="telRaw"></div>
 
     <!-- Mount controls -->
-    <div class="ctrl-group section-div">
+    <div class="ctrl-group">
       <div class="panel-label">Mount</div>
       <div class="ctrl-row">
-        <button class="btn btn-green" id="btnUnpark" onclick="apiUnpark()" disabled>Unpark</button>
-        <button class="btn btn-dim"   id="btnPark"   onclick="apiPark()"   disabled>Park</button>
+        <button class="btn btn-green" id="btnModalUnpark" onclick="apiUnpark()" disabled>Unpark</button>
+        <button class="btn btn-dim"   id="btnModalPark"   onclick="apiPark()"   disabled>Park</button>
       </div>
     </div>
 
@@ -1148,13 +1269,13 @@ body {
     <div class="ctrl-group">
       <div class="panel-label">Tracking</div>
       <div class="ctrl-row">
-        <button class="btn btn-green"  id="btnTrackOn"  onclick="apiTracking(true)"  disabled>Track ON</button>
-        <button class="btn btn-yellow" id="btnTrackOff" onclick="apiTracking(false)" disabled>Track OFF</button>
+        <button class="btn btn-green"  id="btnModalTrackOn"  onclick="apiTracking(true)"  disabled>Track ON</button>
+        <button class="btn btn-yellow" id="btnModalTrackOff" onclick="apiTracking(false)" disabled>Track OFF</button>
       </div>
     </div>
 
     <!-- Slew -->
-    <div class="ctrl-group section-div">
+    <div class="ctrl-group">
       <div class="panel-label">Slew Target</div>
       <div class="inp-grid">
         <div class="inp-group">
@@ -1166,26 +1287,31 @@ body {
           <input class="inp" id="slewDec" type="number" min="-90" max="90" step="0.0001" placeholder="0.0000">
         </div>
       </div>
-      <button class="btn btn-blue btn-full" id="btnSlew" onclick="apiSlew()" disabled>Slew to Target</button>
+      <button class="btn btn-blue btn-full" id="btnModalSlew" onclick="apiSlew()" disabled>Slew to Target</button>
     </div>
   </div>
+</div>
 
-  <!-- Camera panel -->
-  <div class="panel">
-    <div class="panel-hdr">
-      <div class="panel-name">
-        <span class="dot dot-gray" id="camDot"></span>
-        Camera
+<!-- Camera Modal -->
+<div class="modal hidden" id="camModal" onclick="if(event.target===this)closeCameraModal()">
+  <div class="modal-content">
+    <div class="modal-header">
+      <div class="modal-title">
+        <span class="dot dot-gray" id="camModalDot"></span>
+        📷 Camera Control
       </div>
-      <div id="camReady" style="font-size:11px;color:var(--gray)"></div>
+      <button class="modal-close" onclick="closeCameraModal()">×</button>
     </div>
 
     <!-- State display -->
-    <div class="cam-state cs-idle" id="camState">—</div>
-    <div class="cam-sub" id="camSub"></div>
+    <div style="display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 12px;">
+      <div class="cam-state cs-idle" id="camModalState">—</div>
+      <div class="cam-sub" id="camModalSub"></div>
+      <div id="camModalReady" style="font-size:11px;color:var(--gray)"></div>
+    </div>
 
     <!-- Exposure controls -->
-    <div class="ctrl-group section-div">
+    <div class="ctrl-group">
       <div class="panel-label">Exposure</div>
       <div class="inp-grid">
         <div class="inp-group">
@@ -1198,42 +1324,12 @@ body {
         </div>
       </div>
       <div class="ctrl-row">
-        <button class="btn btn-green" id="btnExpose" onclick="apiExpose()" disabled>Expose</button>
-        <button class="btn btn-red"   id="btnAbortExp" onclick="apiAbortExposure()" disabled>Abort</button>
+        <button class="btn btn-green" id="btnModalExpose" onclick="apiExpose()" disabled>Expose</button>
+        <button class="btn btn-red"   id="btnModalAbortExp" onclick="apiAbortExposure()" disabled>Abort</button>
       </div>
     </div>
   </div>
-
-  <!-- Image row: pier cam | last exposure (each sub hides independently) -->
-  <div class="img-col hidden" id="imgRow">
-
-    <div class="img-sub hidden" id="pierCamSub">
-      <div class="panel-hdr" style="flex-shrink:0">
-        <div class="panel-name">
-          <span class="dot dot-gray" id="pierCamDot"></span>
-          Live View
-        </div>
-        <div id="pierCamBadge" style="font-size:10px;color:var(--dim)"></div>
-      </div>
-      <div class="pier-cam-wrap">
-        <img id="pierCamImg" src="" alt="Pier cam live view">
-      </div>
-      <div class="pier-cam-badge" id="pierCamStatus"></div>
-    </div>
-
-    <div class="img-sub hidden" id="lastExpSub">
-      <div class="panel-label">Last Exposure</div>
-      <div class="img-inner">
-        <div class="img-frame">
-          <img id="lastImg" src="" alt="Last exposure">
-        </div>
-        <div class="img-meta" id="imgMeta"></div>
-      </div>
-    </div>
-
-  </div>
-
-</div><!-- /main -->
+</div>
 
 <!-- Log footer -->
 <div class="log-footer">
@@ -1290,6 +1386,32 @@ function render(s) {
   renderImage(s);
   renderPierCam(s.pier_cam || {});
 }
+
+// ── Modal management ────────────────────────────────────────────────────────
+
+function openTelescopeModal() {
+  document.getElementById("telModal").classList.remove("hidden");
+}
+
+function closeTelescopeModal() {
+  document.getElementById("telModal").classList.add("hidden");
+}
+
+function openCameraModal() {
+  document.getElementById("camModal").classList.remove("hidden");
+}
+
+function closeCameraModal() {
+  document.getElementById("camModal").classList.add("hidden");
+}
+
+// Close modals on escape key
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    closeTelescopeModal();
+    closeCameraModal();
+  }
+});
 
 // ── Header ──────────────────────────────────────────────────────────────────
 
@@ -1360,12 +1482,19 @@ function renderSafety(sf) {
 // ── Telescope ───────────────────────────────────────────────────────────────
 
 function renderTelescope(t) {
-  document.getElementById("telDot").className =
-    t.connected ? "dot dot-green" : "dot dot-gray";
+  const dotCls = t.connected ? "dot dot-green" : "dot dot-gray";
+  document.getElementById("telDot").className      = dotCls;
+  document.getElementById("telModalDot").className = dotCls;
 
-  const raEl  = document.getElementById("telRA");
-  const decEl = document.getElementById("telDec");
-  const rawEl = document.getElementById("telRaw");
+  // Update header button style to show connection state
+  const hdrBtn = document.getElementById("btnHdrTel");
+  if (t.connected)       hdrBtn.className = "btn btn-green";
+  else if (t.enabled)    hdrBtn.className = "btn btn-red";
+  else                   hdrBtn.className = "btn btn-dim";
+
+  const raEl  = document.getElementById("telModalRA");
+  const decEl = document.getElementById("telModalDec");
+  const rawEl = document.getElementById("telModalRaw");
 
   if (t.connected && t.ra != null) {
     raEl.textContent  = fmtRA(t.ra);
@@ -1379,27 +1508,28 @@ function renderTelescope(t) {
     rawEl.textContent = "";
   }
 
-  // Badges
-  const badges = document.getElementById("telBadges");
-  badges.innerHTML = "";
-  if (t.connected) {
-    if (t.busy)                               badges.innerHTML += `<span class="badge badge-warn pulse">Busy</span>`;
-    if (t.slewing)                            badges.innerHTML += `<span class="badge badge-warn pulse">Slewing</span>`;
-    if (t.tracking)                           badges.innerHTML += `<span class="badge badge-on">Tracking</span>`;
-    if (t.parked)                             badges.innerHTML += `<span class="badge badge-warn">Parked</span>`;
-    if (!t.busy && !t.slewing && !t.tracking && !t.parked)
-                                              badges.innerHTML += `<span class="badge">Idle</span>`;
-  } else if (t.enabled) {
-    badges.innerHTML += `<span class="badge badge-err">Disconnected</span>`;
+  // Badges in modal header
+  const badges = document.getElementById("telModalBadges");
+  if (badges) {
+    badges.innerHTML = "";
+    if (t.connected) {
+      if (t.busy)     badges.innerHTML += `<span class="badge badge-warn pulse">Busy</span>`;
+      if (t.slewing)  badges.innerHTML += `<span class="badge badge-warn pulse">Slewing</span>`;
+      if (t.tracking) badges.innerHTML += `<span class="badge badge-on">Tracking</span>`;
+      if (t.parked)   badges.innerHTML += `<span class="badge badge-warn">Parked</span>`;
+      if (!t.busy && !t.slewing && !t.tracking && !t.parked)
+                      badges.innerHTML += `<span class="badge">Idle</span>`;
+    } else if (t.enabled) {
+      badges.innerHTML += `<span class="badge badge-err">Disconnected</span>`;
+    }
   }
 
-  // Button states — disabled while not connected, busy, or slewing
   const blocked = !t.connected || t.busy || t.slewing;
-  document.getElementById("btnUnpark").disabled   = blocked;
-  document.getElementById("btnPark").disabled     = blocked;
-  document.getElementById("btnTrackOn").disabled  = blocked;
-  document.getElementById("btnTrackOff").disabled = blocked;
-  document.getElementById("btnSlew").disabled     = blocked;
+  document.getElementById("btnModalUnpark").disabled   = blocked;
+  document.getElementById("btnModalPark").disabled     = blocked;
+  document.getElementById("btnModalTrackOn").disabled  = blocked;
+  document.getElementById("btnModalTrackOff").disabled = blocked;
+  document.getElementById("btnModalSlew").disabled     = blocked;
 }
 
 // ── Camera ───────────────────────────────────────────────────────────────────
@@ -1407,12 +1537,20 @@ function renderTelescope(t) {
 const CAM_CLASSES = ["cs-idle","cs-wait","cs-expose","cs-read","cs-dl","cs-error"];
 
 function renderCamera(c) {
-  document.getElementById("camDot").className =
-    c.connected ? "dot dot-green" : "dot dot-gray";
+  const dotCls = c.connected ? "dot dot-green" : "dot dot-gray";
+  document.getElementById("camDot").className      = dotCls;
+  document.getElementById("camModalDot").className = dotCls;
 
-  const stEl  = document.getElementById("camState");
-  const subEl = document.getElementById("camSub");
-  const rdEl  = document.getElementById("camReady");
+  // Update header button style
+  const hdrBtn = document.getElementById("btnHdrCam");
+  if (c.connected && c.exposing) hdrBtn.className = "btn btn-yellow";
+  else if (c.connected)          hdrBtn.className = "btn btn-green";
+  else if (c.enabled)            hdrBtn.className = "btn btn-red";
+  else                           hdrBtn.className = "btn btn-dim";
+
+  const stEl  = document.getElementById("camModalState");
+  const subEl = document.getElementById("camModalSub");
+  const rdEl  = document.getElementById("camModalReady");
 
   if (c.connected) {
     stEl.textContent = (c.exposing ? (c.state_name || "Exposing") : (c.state_name || "—")).toUpperCase();
@@ -1427,18 +1565,25 @@ function renderCamera(c) {
     rdEl.textContent  = "";
   }
 
-  document.getElementById("btnExpose").disabled   = !c.connected || c.exposing;
-  document.getElementById("btnAbortExp").disabled = !c.connected || !c.exposing;
+  // Also reflect image-ready in main area badge
+  const imgReadyBadge = document.getElementById("imgReadyBadge");
+  if (imgReadyBadge) {
+    imgReadyBadge.textContent = c.image_ready ? "✓ IMAGE READY" : "";
+    imgReadyBadge.style.color = c.image_ready ? "var(--green)" : "var(--dim)";
+  }
+
+  document.getElementById("btnModalExpose").disabled   = !c.connected || c.exposing;
+  document.getElementById("btnModalAbortExp").disabled = !c.connected || !c.exposing;
 }
 
-// ── Image row visibility ──────────────────────────────────────────────────────
+// ── Main area visibility ──────────────────────────────────────────────────────
 
 function updateImgRow() {
-  const row  = document.getElementById("imgRow");
-  const pier = document.getElementById("pierCamSub");
-  const last = document.getElementById("lastExpSub");
-  const show = !pier.classList.contains("hidden") || !last.classList.contains("hidden");
-  row.classList.toggle("hidden", !show);
+  const pier  = document.getElementById("pierCamSub");
+  const last  = document.getElementById("lastExpSub");
+  const empty = document.getElementById("mainEmpty");
+  const hasContent = !pier.classList.contains("hidden") || !last.classList.contains("hidden");
+  empty.style.display = hasContent ? "none" : "flex";
 }
 
 // ── Image ────────────────────────────────────────────────────────────────────
