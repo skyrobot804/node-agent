@@ -7,6 +7,7 @@ Then open http://localhost:5173 in a browser.
 """
 
 import base64
+import copy
 import io
 import json
 import logging
@@ -89,11 +90,10 @@ _log_history: list[dict] = []
 
 
 def _broadcast(entry: dict) -> None:
-    global _log_history
-    _log_history.append(entry)
-    if len(_log_history) > 300:
-        _log_history = _log_history[-300:]
     with _subscribers_lock:
+        _log_history.append(entry)
+        if len(_log_history) > 300:
+            del _log_history[:-300]
         dead = []
         for q in _subscribers:
             try:
@@ -342,19 +342,21 @@ def index():
 @app.route("/api/status")
 def api_status():
     with _state_lock:
-        return jsonify(dict(_state))
+        snapshot = copy.deepcopy(_state)
+    return jsonify(snapshot)
 
 
 @app.route("/api/logs")
 def api_logs():
     q: queue.Queue = queue.Queue(maxsize=400)
-    for entry in _log_history:
+    with _subscribers_lock:
+        history_snapshot = list(_log_history)
+        _subscribers.append(q)
+    for entry in history_snapshot:
         try:
             q.put_nowait(entry)
         except queue.Full:
             break
-    with _subscribers_lock:
-        _subscribers.append(q)
 
     def generate():
         try:
@@ -716,7 +718,7 @@ body {
   background: var(--surface);
   padding: 14px 20px;
   display: flex; flex-direction: column; gap: 10px;
-  overflow: hidden; min-height: 0;
+  overflow-y: auto; min-height: 0;
 }
 .img-col.hidden { display: none; }
 
@@ -789,7 +791,7 @@ body {
 /* ── Image panel ── */
 .img-inner {
   display: flex; align-items: flex-start; gap: 20px;
-  overflow: hidden; min-height: 0;
+  overflow-y: auto; min-height: 0;
 }
 .img-frame {
   border: 1px solid var(--border); background: #000;

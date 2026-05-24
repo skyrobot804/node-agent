@@ -46,7 +46,11 @@ class ImageWatcher:
         from watchdog.events import FileSystemEventHandler
 
         if not os.path.isdir(self._path):
-            logger.warning("Watch path does not exist yet, will retry: %s", self._path)
+            logger.error(
+                "Image watcher not started — watch path does not exist: %s",
+                self._path,
+            )
+            return
 
         watcher = self
 
