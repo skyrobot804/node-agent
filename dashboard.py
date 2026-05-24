@@ -6,6 +6,8 @@ Run:  python dashboard.py
 Then open http://localhost:5000 in a browser.
 """
 
+import base64
+import io
 import json
 import logging
 import queue
@@ -62,9 +64,10 @@ _state: dict[str, Any] = {
         "sun_elevation":     None,
         "dawn_threshold":    -18.0,
     },
-    "hold_remaining": None,
-    "error":          None,
-    "run_active":     False,
+    "hold_remaining":  None,
+    "error":           None,
+    "run_active":      False,
+    "image_captured":  False,
 }
 _state_lock = threading.Lock()
 
@@ -139,6 +142,53 @@ sys.stdout = _StdoutCapture()  # type: ignore[assignment]
 
 _tel: Optional[Telescope] = None
 _cam: Optional[Camera] = None
+
+# ── Captured image (base64-encoded PNG, set after expose) ─────────────────────
+
+_last_image_b64: Optional[str] = None
+_last_image_lock = threading.Lock()
+
+
+def _capture_image() -> None:
+    """Download the latest image from the camera, convert to PNG, and store as base64."""
+    global _last_image_b64
+    if _cam is None:
+        return
+    try:
+        import numpy as np
+        from PIL import Image
+
+        logger.info("Downloading image array from camera…")
+        raw = _cam.image_array()
+        arr = np.array(raw, dtype=np.float32)
+
+        # ALPACA returns shape (planes, height, width) for color or (height, width) for mono.
+        if arr.ndim == 3 and arr.shape[0] in (1, 3):
+            arr = np.transpose(arr, (1, 2, 0))
+            if arr.shape[2] == 1:
+                arr = arr[:, :, 0]
+
+        # Stretch to 8-bit
+        mn, mx = float(arr.min()), float(arr.max())
+        if mx > mn:
+            arr = (arr - mn) / (mx - mn) * 255.0
+        arr = arr.clip(0, 255).astype(np.uint8)
+
+        mode = "RGB" if arr.ndim == 3 else "L"
+        img = Image.fromarray(arr, mode=mode)
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+
+        with _last_image_lock:
+            _last_image_b64 = b64
+        with _state_lock:
+            _state["image_captured"] = True
+        logger.info("Image stored — %.1f KB PNG", len(b64) * 3 / 4 / 1024)
+    except Exception as exc:
+        logger.error("Image capture failed: %s", exc)
+
 
 # ── Safety manager (created in launch(), telescope attached after connect) ─────
 
@@ -228,7 +278,7 @@ def _run_sequence(cfg: dict) -> None:
     global _tel, _cam
     try:
         with _state_lock:
-            _state.update(run_active=True, error=None, phase="idle")
+            _state.update(run_active=True, error=None, phase="idle", image_captured=False)
 
         alpaca_cfg  = cfg.get("alpaca", {})
         devices_cfg = cfg.get("devices", {})
@@ -322,6 +372,7 @@ def _run_sequence(cfg: dict) -> None:
             _cam.set_binning(binning)
             _cam.expose(duration=duration, light=True)
             if _run_abort.is_set(): return
+            _capture_image()
 
         # ── Park ───────────────────────────────────────────────────────────────
         if _tel is not None:
@@ -480,11 +531,49 @@ def api_abort():
     return jsonify({"ok": True})
 
 
+@app.route("/api/slew", methods=["POST"])
+def api_slew():
+    global _tel
+    if _tel is None:
+        return jsonify({"error": "Telescope not connected"}), 400
+    data = request.get_json(force=True) or {}
+    try:
+        ra  = float(data["ra"])
+        dec = float(data["dec"])
+    except (KeyError, ValueError):
+        return jsonify({"error": "Invalid ra/dec"}), 400
+    if not (0.0 <= ra < 24.0):
+        return jsonify({"error": "RA must be in range [0, 24)"}), 400
+    if not (-90.0 <= dec <= 90.0):
+        return jsonify({"error": "Dec must be in range [-90, 90]"}), 400
+
+    def _do_slew():
+        try:
+            _tel.slew_to_coordinates(ra=ra, dec=dec)
+        except Exception as exc:
+            logger.error("Manual slew failed: %s", exc)
+
+    threading.Thread(target=_do_slew, daemon=True, name="manual-slew").start()
+    logger.info("Manual slew commanded: RA=%.4f h  Dec=%.4f °", ra, dec)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/safety")
 def api_safety():
     if _safety_mgr is None:
         return jsonify({"enabled": False})
     return jsonify({"enabled": True, **_safety_mgr.status()})
+
+
+@app.route("/api/image")
+def api_image():
+    with _last_image_lock:
+        b64 = _last_image_b64
+    if b64 is None:
+        return jsonify({"error": "No image available"}), 404
+    img_bytes = base64.b64decode(b64)
+    return Response(img_bytes, content_type="image/png",
+                    headers={"Cache-Control": "no-store"})
 
 
 # ── HTML template ──────────────────────────────────────────────────────────────
@@ -585,7 +674,7 @@ body {
 .main {
   flex: 1;
   display: grid;
-  grid-template-rows: auto 1fr 180px;
+  grid-template-rows: auto 1fr auto 180px;
   grid-template-columns: 1fr 1fr;
   gap: 1px;
   background: var(--border);
@@ -669,7 +758,43 @@ body {
 .cs-error  { color: var(--red); }
 .cam-sub   { color: var(--dim); font-size: 11px; }
 
-/* ── Log panel (row 3, full width) ── */
+/* ── Image panel (row 3, full width) ── */
+.img-panel {
+  grid-column: 1 / -1;
+  background: var(--surface);
+  padding: 12px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.img-panel.hidden { display: none; }
+.img-inner {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+}
+.img-frame {
+  border: 1px solid var(--border);
+  background: #000;
+  flex-shrink: 0;
+  max-width: 480px;
+  position: relative;
+}
+.img-frame img {
+  display: block;
+  max-width: 480px;
+  max-height: 320px;
+  width: 100%;
+  image-rendering: pixelated;
+}
+.img-meta {
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.8;
+}
+.img-meta span { color: var(--text); }
+
+/* ── Log panel (row 4, full width) ── */
 .log-panel {
   grid-column: 1 / -1;
   background: var(--surface);
@@ -799,6 +924,20 @@ body {
       <div class="coord-val dim" id="telDec">—</div>
     </div>
     <div class="coord-raw" id="telRaw"></div>
+    <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
+      <div class="panel-label" style="margin-bottom:6px;">Slew Target</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div>
+          <div style="font-size:10px;color:var(--dim);letter-spacing:1px;margin-bottom:3px;">R.A. (decimal hours)</div>
+          <input class="inp" id="slewRA" type="number" min="0" max="23.9999" step="0.0001" placeholder="0.0000">
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--dim);letter-spacing:1px;margin-bottom:3px;">Dec (decimal degrees)</div>
+          <input class="inp" id="slewDec" type="number" min="-90" max="90" step="0.0001" placeholder="0.0000">
+        </div>
+      </div>
+      <button class="btn btn-blue" id="btnSlew" onclick="apiSlew()" style="margin-top:8px;width:100%;" disabled>Slew to Target</button>
+    </div>
   </div>
 
   <!-- Camera -->
@@ -812,6 +951,17 @@ body {
     </div>
     <div class="cam-state cs-idle" id="camState">—</div>
     <div class="cam-sub" id="camSub"></div>
+  </div>
+
+  <!-- Image panel (hidden until an exposure is captured) -->
+  <div class="img-panel hidden" id="imgPanel">
+    <div class="panel-label">Last Exposure</div>
+    <div class="img-inner">
+      <div class="img-frame">
+        <img id="lastImg" src="" alt="Last exposure">
+      </div>
+      <div class="img-meta" id="imgMeta"></div>
+    </div>
   </div>
 
   <!-- Log panel -->
@@ -901,6 +1051,42 @@ function render(s) {
   renderTelescope(s.telescope || {});
   renderCamera(s.camera || {});
   renderSafety(s.safety || {});
+  renderImage(s);
+}
+
+let _imageFetched = false;
+
+async function renderImage(s) {
+  if (!s.image_captured) return;
+  if (_imageFetched) return;
+  _imageFetched = true;
+
+  const panel   = document.getElementById("imgPanel");
+  const img     = document.getElementById("lastImg");
+  const meta    = document.getElementById("imgMeta");
+
+  panel.classList.remove("hidden");
+  meta.innerHTML = "Downloading…";
+
+  try {
+    const r = await fetch("/api/image");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const blob = await r.blob();
+    const url  = URL.createObjectURL(blob);
+    img.src = url;
+
+    const kb = (blob.size / 1024).toFixed(1);
+    const ts = new Date().toLocaleTimeString();
+    img.onload = () => {
+      meta.innerHTML =
+        `Captured: <span>${ts}</span><br>` +
+        `Size: <span>${img.naturalWidth} × ${img.naturalHeight} px</span><br>` +
+        `File: <span>${kb} KB (PNG)</span>`;
+    };
+  } catch (e) {
+    meta.innerHTML = `<span style="color:var(--red)">Image load failed: ${e.message}</span>`;
+    _imageFetched = false;
+  }
 }
 
 function renderSafety(sf) {
@@ -1045,6 +1231,8 @@ function renderTelescope(t) {
     rawEl.textContent = "";
   }
 
+  const slewBtn = document.getElementById("btnSlew");
+  if (slewBtn) slewBtn.disabled = !t.connected || t.slewing;
   const b = document.getElementById("telBadges");
   b.innerHTML = "";
   if (t.connected) {
@@ -1197,7 +1385,12 @@ async function apiRun() {
   try {
     const r = await fetch("/api/run", { method: "POST" });
     const d = await r.json();
-    if (!d.ok) alert(d.error || "Run failed");
+    if (!d.ok) { alert(d.error || "Run failed"); return; }
+    // Reset image panel for the new run
+    _imageFetched = false;
+    document.getElementById("imgPanel").classList.add("hidden");
+    document.getElementById("lastImg").src = "";
+    document.getElementById("imgMeta").innerHTML = "";
   } catch (e) {
     alert("Run failed: " + e.message);
   }
@@ -1205,6 +1398,27 @@ async function apiRun() {
 
 async function apiAbort() {
   await fetch("/api/abort", { method: "POST" });
+}
+
+async function apiSlew() {
+  const ra  = parseFloat(document.getElementById("slewRA").value);
+  const dec = parseFloat(document.getElementById("slewDec").value);
+  if (isNaN(ra) || isNaN(dec)) { alert("Enter valid RA (h) and Dec (°) values."); return; }
+  const btn = document.getElementById("btnSlew");
+  btn.disabled = true; btn.textContent = "Slewing…";
+  try {
+    const r = await fetch("/api/slew", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ra, dec }),
+    });
+    const d = await r.json();
+    if (!d.ok) alert(d.error || "Slew failed");
+  } catch (e) {
+    alert("Slew failed: " + e.message);
+  }
+  btn.textContent = "Slew to Target";
+  // disabled state re-evaluated on next status poll
 }
 </script>
 </body>
