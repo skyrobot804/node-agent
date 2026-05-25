@@ -50,6 +50,11 @@ class Telescope:
         self._c._put("tracking", Tracking=enabled)
         logger.info("Tracking set to %s", enabled)
 
+    def begin_slew(self, ra: float, dec: float) -> None:
+        """Issue the async slew command and return immediately without polling."""
+        self._c._put("slewtocoordinatesasync", timeout=30, RightAscension=ra, Declination=dec)
+        logger.info("Slew commanded: RA=%.4f h  Dec=%.4f °", ra, dec)
+
     def slew_to_coordinates(self, ra: float, dec: float) -> None:
         """
         Slew to equatorial coordinates and wait until the mount stops moving.

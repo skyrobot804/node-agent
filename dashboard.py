@@ -685,16 +685,12 @@ def api_slew():
     if not (-90.0 <= dec <= 90.0):
         return jsonify({"error": "Dec must be in range [-90, 90]"}), 400
 
-    def _do():
-        try:
-            _tel.slew_to_coordinates(ra=ra, dec=dec)
-        except Exception as exc:
-            logger.error("Slew failed: %s", exc)
-            with _state_lock:
-                _state["error"] = str(exc)
+    try:
+        _tel.begin_slew(ra, dec)
+    except Exception as exc:
+        logger.error("Slew failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
 
-    threading.Thread(target=_do, daemon=True, name="tel-slew").start()
-    logger.info("Slew commanded: RA=%.4f h  Dec=%.4f °", ra, dec)
     return jsonify({"ok": True})
 
 
@@ -736,13 +732,12 @@ def api_nudge():
         new_ra   = (cur_ra + ra_delta) % 24.0
         new_dec  = cur_dec
 
-    def _do():
-        try:
-            _tel.slew_to_coordinates(ra=new_ra, dec=new_dec)
-        except Exception as exc:
-            logger.error("Nudge slew failed: %s", exc)
+    try:
+        _tel.begin_slew(new_ra, new_dec)
+    except Exception as exc:
+        logger.error("Nudge slew failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
 
-    threading.Thread(target=_do, daemon=True, name="tel-nudge").start()
     logger.info("Nudge %s %.0f\" → RA=%.4f h  Dec=%.4f °", direction, step_arcsec, new_ra, new_dec)
     return jsonify({"ok": True})
 
